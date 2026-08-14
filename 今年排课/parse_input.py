@@ -69,6 +69,12 @@ def clean_teacher_cell(raw):
     annotations = re.findall(r"\(([^()]*)\)", text)
     base = re.sub(r"\([^()]*\)", "", text)
 
+    # 有些单元格把"代"直接接在姓名后面而不带括号（如"杨洁代"、"黄晓珍代"），
+    # 跟带括号的"（XX代）"是同一种"代课"标注，需要一并去掉，否则会把同一个人错认成两个人
+    if len(base) > 1 and base.endswith("代"):
+        flags["substitute_note"] = base
+        base = base[:-1]
+
     role_suffix = None
     for a in annotations:
         if "班队活动" in a and ("生命" in a or "安全" in a):

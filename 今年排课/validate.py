@@ -8,7 +8,9 @@ from build_atoms import build_all_atoms, CHINESE, PE, LIFE_SAFETY, LABOR_AI, BAN
 from solve import (
     FORBIDDEN_MON_AM234, FUNCTION_ROOM_GROUPS, MATH, GRADE26,
     TUE_AM_SLOTS, WED_AM_SLOTS, MON_AM234_SLOTS, MON_P5, FRI_P34,
-    CAMPUS_OF_GRADE, AM_PERIODS,
+    CAMPUS_OF_GRADE, AM_PERIODS, RUN_CAP, DAILY_PERIOD_CAP,
+    MATH_ATTRIBUTED_SUBJECTS, classify_teacher_for_caps,
+    TEACHER_AM_ONLY_EXCEPT_DAY,
 )
 
 
@@ -84,7 +86,8 @@ def validate(classes, all_atoms, solution):
             if slot in TUE_AM_SLOTS and any(t in chinese_teachers for t in teachers):
                 rule12_violations.append(f"{key} atom{idx} 语文老师{teachers}被排在周二上午(slot={slot})")
             if slot in WED_AM_SLOTS and any(t in math_teachers for t in teachers):
-                is_allowed_exception = (key[0] in GRADE26 and a["subject"] == MATH and slot % 10 == 4)
+                is_allowed_exception = (key[0] in GRADE26 and a["subject"] in (MATH, "综合实践")
+                                        and slot % 10 == 4)
                 if not is_allowed_exception:
                     rule12_violations.append(f"{key} atom{idx} 数学老师{teachers}被排在周三上午(slot={slot})")
     if rule12_violations:
@@ -212,6 +215,104 @@ def validate(classes, all_atoms, solution):
         report["degradations"].append(f"规则11同校区跨年级相邻(软约束)：共{cross_grade_soft_count}处未完全错开")
     else:
         report["ok_summary"].append("规则11同校区跨年级相邻(软约束): 全部满足")
+
+    # 11. 需求1：同一老师连堂上限 + 专职老师每天课时上限
+    teacher_primaries = defaultdict(set)
+    teacher_role_periods = defaultdict(lambda: defaultdict(float))
+    for c in classes:
+        for e in c["subjects"]:
+            teacher_primaries[e["teacher_raw"]].add(e["col_primary_subject"])
+            teacher_role_periods[e["teacher_raw"]][e["col_primary_subject"]] += e["periods"]
+
+    teacher_slots = defaultdict(set)
+    for key in solved_keys:
+        atoms = all_atoms[key]
+        for idx, slot in solution[key].items():
+            for t in atoms[idx]["teachers"]:
+                teacher_slots[t].add(slot)
+
+    run_violations = []
+    daily_violations = []
+    for t, slots in teacher_slots.items():
+        category = classify_teacher_for_caps(t, teacher_primaries, teacher_role_periods)
+        run_cap = RUN_CAP.get(category)
+        daily_cap = DAILY_PERIOD_CAP.get(category)
+        by_day = defaultdict(set)
+        for s in slots:
+            by_day[s // 10].add(s % 10)
+        for d, periods in by_day.items():
+            if daily_cap is not None and len(periods) > daily_cap:
+                daily_violations.append(
+                    f"{t}({category}): 周{d}排了{len(periods)}节课，超过每天{daily_cap}节上限")
+            if run_cap is not None:
+                run = 0
+                for p in range(1, 8):
+                    run = run + 1 if p in periods else 0
+                    if run > run_cap:
+                        run_violations.append(
+                            f"{t}({category}): 周{d}出现{run}节连堂（上限{run_cap}节），"
+                            f"该天节次={sorted(periods)}")
+                        break
+    if run_violations:
+        report["errors"].extend(run_violations)
+    else:
+        report["ok_summary"].append(
+            "需求1连堂上限(语文≤2节/数学≤3节/其他专职≤3节，按老师本人算): 全部满足")
+    if daily_violations:
+        report["errors"].extend(daily_violations)
+    else:
+        report["ok_summary"].append("需求1专职老师每天≤5节课: 全部满足")
+
+    # 12. 需求2：每个班"数学老师教的课"(数学+综合实践+劳动)下午总节数 <= 2，且尽量 <= 1
+    math_pm_hard = []
+    math_pm_soft = []
+    for key in solved_keys:
+        atoms = all_atoms[key]
+        math_teachers = set(t for a in atoms if a["subject"] == MATH for t in a["teachers"])
+        pm_entries = []
+        for idx, slot in solution[key].items():
+            a = atoms[idx]
+            if a["subject"] in MATH_ATTRIBUTED_SUBJECTS and set(a["teachers"]) & math_teachers:
+                if slot % 10 not in AM_PERIODS:
+                    pm_entries.append((a["subject"], slot // 10, slot % 10))
+        if len(pm_entries) > 2:
+            math_pm_hard.append(f"{key}: 数学系课程下午有{len(pm_entries)}节（硬上限2节）{pm_entries}")
+        elif len(pm_entries) == 2:
+            math_pm_soft.append(f"{key}: 数学系课程下午有2节（理想1节）{pm_entries}")
+    if math_pm_hard:
+        report["errors"].extend(math_pm_hard)
+    else:
+        report["ok_summary"].append("需求2每班数学系课程(数学+综合实践+劳动)下午≤2节(硬上限): 全部满足")
+    if math_pm_soft:
+        report["degradations"].append(
+            f"需求2每班数学系课程下午2节（理想压到1节）：共{len(math_pm_soft)}个班")
+        for line in math_pm_soft:
+            report["degradations"].append(f"    {line}")
+    else:
+        report["ok_summary"].append("需求2每班数学系课程下午均≤1节: 全部满足")
+
+    # 13. 点名老师"除某天外必须上午"（用户：卢诗雨除周二外都排上午）
+    named_am_violations = []
+    for key in solved_keys:
+        atoms = all_atoms[key]
+        for idx, slot in solution[key].items():
+            a = atoms[idx]
+            day, period = slot // 10, slot % 10
+            if period in AM_PERIODS:
+                continue
+            if a["kind"] == "banduihuodong_fixed":
+                continue  # 全校固定槎（周一下午第1节），不受这条约束
+            for t in a["teachers"]:
+                exc_day = TEACHER_AM_ONLY_EXCEPT_DAY.get(t)
+                if exc_day is not None and day != exc_day:
+                    named_am_violations.append(
+                        f"{key}: {t} 的「{a['subject']}」被排在周{day}第{period}节(下午)，"
+                        f"但只允许周{exc_day}下午")
+    if named_am_violations:
+        report["errors"].extend(named_am_violations)
+    elif TEACHER_AM_ONLY_EXCEPT_DAY:
+        names = "、".join(f"{t}(除周{d})" for t, d in TEACHER_AM_ONLY_EXCEPT_DAY.items())
+        report["ok_summary"].append(f"点名老师除指定日外必须上午（{names}）: 全部满足")
 
     return report
 

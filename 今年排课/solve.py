@@ -19,25 +19,61 @@ FORBIDDEN_MON_AM234 = {
 }
 
 # 功能室冲突组：(教师集合, 限定年级key)
+# 注意：信息科技/劳动&人工智能 这一条线的分组已按用户2026-08最新更正版本重排（旧版本有误：
+# 旧版把"吴珍林、缪阳、邹旭"挂到五年级、"谢莹莹、吴磊"挂到六年级，与实际任课年级不符，
+# 导致这两条约束实际上是空的/无效的）。其余（科学、美术等）功能室分组保持不变。
 FUNCTION_ROOM_GROUPS = [
-    ({"张振中", "杨清涵"}, "2024级"),
-    ({"吴珍林", "缪阳", "邹旭"}, "2023级"),
-    ({"吴珍林", "缪阳", "邹旭"}, "2022级"),
-    ({"谢莹莹", "吴磊"}, "2021级"),
+    # —— 信息科技 / 劳动&人工智能 条线（2026-08 更正版）——
+    ({"张振中", "杨清涵"}, "2024级"),          # 三年级
+    ({"吴珍林", "缪阳", "邹旭"}, "2023级"),      # 四年级
+    ({"谢莹莹", "吴磊"}, "2022级"),            # 五年级
+    ({"吴磊", "李宏伟"}, "2021级"),            # 六年级
+    # —— 其余功能室分组（未变更）——
     ({"曾永佳", "李佳壕"}, "2024级"),
     ({"赵丹", "刘琳", "谢媛怡"}, "2023级"),
     ({"陈小兰", "李玉庆"}, "2022级"),
     ({"王辉", "谢媛怡"}, "2021级"),
 ]
 
+# 点名指定"除某一天外，其余时段必须排上午"的老师：教师姓名 -> 允许下午的那一天(1=周一..5=周五)
+# 用户要求：卢诗雨的课除了周二，其他时段都排在上午
+TEACHER_AM_ONLY_EXCEPT_DAY = {
+    "卢诗雨": 2,
+}
+
+# 单双周合并槎的显示约定：combo的第一个科目=单周，第二个科目=双周
+WEEK_LABEL_FIRST = "单周"
+WEEK_LABEL_SECOND = "双周"
+
 GRADE26 = ("2026级", "2025级")
 CAMPUS_OF_GRADE = {"2026级": "B", "2025级": "A", "2024级": "A", "2023级": "A", "2022级": "A", "2021级": "A"}
 
-WEIGHT_DAILY_CHINESE = 1000
-WEIGHT_DAILY_MATH = 1000
+WEIGHT_DAILY_CHINESE = 20000
+WEIGHT_DAILY_MATH = 50000
 WEIGHT_FRIDAY_DOUBLE = 500
+WEIGHT_MATH_PM_OVERFLOW = 300
 WEIGHT_CROSS_GRADE_ADJACENCY = 50
 WEIGHT_PM_CORE_OVERFLOW = 5
+
+# 需求1：同一老师连续排课上限（按老师本人算，语文老师连带道法/劳动/班队活动，数学老师连带综合实践/劳动）
+# 语文≤2节；数学≤3节；其余所有专职学科一律≤3节且每天≤5节（用户确认：生命生态安全&心理健康、
+# 劳动&人工智能与音乐/美术同档；习读本、道德与法治等其余专职学科同理）
+RUN_CAP = {
+    "语文": 2,
+    "数学": 3,
+    "外语": 3, "音乐": 3, "体育与健康": 3, "美术": 3, "科学": 3,
+    "信息科技": 3, "劳动&人工智能": 3, "生命.生态.安全&心理健康": 3,
+    "习读本": 3, "道德与法治": 3, "综合实践": 3, "劳动": 3, "阅读": 3, "国际理解": 3,
+}
+# 需求1：专职老师（语文、数学之外）每天最多5节课；语文老师另有更严的每天≤3节（用户明确要求，
+# 哪怕这3节不是连续的——比如两节语文+一节班队活动+一节道法，一天摊开来算了4节，也不允许）
+DAILY_PERIOD_CAP = {
+    "语文": 3,
+    "外语": 5, "音乐": 5, "体育与健康": 5, "美术": 5, "科学": 5,
+    "信息科技": 5, "劳动&人工智能": 5, "生命.生态.安全&心理健康": 5,
+    "习读本": 5, "道德与法治": 5, "综合实践": 5, "劳动": 5, "阅读": 5, "国际理解": 5,
+}
+MATH_ATTRIBUTED_SUBJECTS = {MATH, "综合实践", "劳动"}
 
 
 def valid_slots_for_grade(grade_key):
@@ -90,6 +126,38 @@ def _add_daily_coverage_soft(model, key, idxs, day_vars, penalty_terms, weight, 
         penalty_terms.append((weight, covered.Not(), key, d))
 
 
+def _add_daily_coverage_hard(model, key, idxs, day_vars, max_per_day=2):
+    """要求 idxs 里的atom的day必须覆盖全部5天（每天至少1个）——真正的硬约束，不设退路。
+    只在已确认没有物理冲突（比如共享老师+教研时间导致某天排不出）之后才应该用这个，
+    否则应该用 _add_daily_coverage_soft。
+    """
+    if not idxs:
+        return
+    for d in range(1, 6):
+        day_bools = []
+        for i in idxs:
+            b = model.NewBoolVar(f"cov_{key}_{i}_d{d}")
+            model.Add(day_vars[(key, i)] == d).OnlyEnforceIf(b)
+            model.Add(day_vars[(key, i)] != d).OnlyEnforceIf(b.Not())
+            day_bools.append(b)
+        model.Add(sum(day_bools) >= 1)
+        model.Add(sum(day_bools) <= max_per_day)
+
+
+def _add_daily_total_cap(model, key, idxs, day_vars, cap):
+    """要求 idxs 里的atom每天的总节数不超过cap（不要求连续，纯粹是当天的总数）。"""
+    if not idxs:
+        return
+    for d in range(1, 6):
+        day_bools = []
+        for i in idxs:
+            b = model.NewBoolVar(f"daycap_{key}_{i}_d{d}")
+            model.Add(day_vars[(key, i)] == d).OnlyEnforceIf(b)
+            model.Add(day_vars[(key, i)] != d).OnlyEnforceIf(b.Not())
+            day_bools.append(b)
+        model.Add(sum(day_bools) <= cap)
+
+
 def candidate_slots(atom, grade_key, class_teachers_are_chinese, class_teachers_are_math):
     """根据atom的教师身份和kind，算出它可用的slot集合（域裁剪，规则1/2/5/3/4，以及"语文/数学除了
     教研当天都必须在上午"这条用户明确加强过的要求）。
@@ -116,6 +184,11 @@ def candidate_slots(atom, grade_key, class_teachers_are_chinese, class_teachers_
         # 规则5：15人周一上午2-4节禁排，连堂退化到周一时也不能违反这条
         if any(t in FORBIDDEN_MON_AM234 for t in atom["teachers"]):
             candidates -= MON_AM234_SLOTS
+        # 点名老师的"除某天外必须上午"要求（当前连堂候选本来就都在上午，这里是防御性处理）
+        for t in atom["teachers"]:
+            exc_day = TEACHER_AM_ONLY_EXCEPT_DAY.get(t)
+            if exc_day is not None:
+                candidates = {s for s in candidates if s % 10 in AM_PERIODS or s // 10 == exc_day}
         return candidates
 
     # 常规裁剪：规则1（语文老师周二上午不排）、规则2（数学老师周三上午不排）、规则5（15人周一上午2-4节不排）
@@ -124,26 +197,109 @@ def candidate_slots(atom, grade_key, class_teachers_are_chinese, class_teachers_
     if any(t in class_teachers_are_chinese for t in teachers):
         domain -= TUE_AM_SLOTS
     if any(t in class_teachers_are_math for t in teachers):
-        if grade_key in GRADE26 and atom["subject"] == MATH:
-            # 用户明确放开的口子：一二年级数学课允许部分班排在周三上午第4节（缓解同一数学老师带2个班时
-            # 周三下午只有1个槎位、两个班抢不过来的问题），其余人/其余科目仍然周三上午全禁
+        if grade_key in GRADE26 and atom["subject"] in (MATH, "综合实践"):
+            # 用户明确放开的口子：一二年级数学课（含综合实践）允许部分班排在周三上午第4节（缓解同一数学
+            # 老师带2个班时周三下午只有1个槎位、两个班抢不过来的问题），其余人/其余科目仍然周三上午全禁
             domain -= (WED_AM_SLOTS - {34})
         else:
             domain -= WED_AM_SLOTS
     if any(t in FORBIDDEN_MON_AM234 for t in teachers):
         domain -= MON_AM234_SLOTS
 
-    # 语文、数学：除了各自的教研当天（语文=周二，数学=周三），其余天全部只能排上午（用户明确要求，硬约束）
+    # 语文、数学：除了各自的教研当天（语文=周二，数学=周三），其余天全部只能排上午（用户明确要求，硬约束）。
+    # 数学老师教的课不止"数学"这一个科目名——综合实践、（部分年级的）劳动也是同一个数学老师教的，
+    # 同样要受这条"非教研日必须上午"的约束，否则这部分课会被解出到下午，跟老师本人的排课意图不符。
     if atom["subject"] == CHINESE:
         am_only = {s for s in domain if s % 10 in AM_PERIODS}
         exception_pm = domain & _pm_slots_for_day(grade_key, 2)
         domain = am_only | exception_pm
-    elif atom["subject"] == MATH:
+    elif atom["subject"] in MATH_ATTRIBUTED_SUBJECTS and any(t in class_teachers_are_math for t in teachers):
         am_only = {s for s in domain if s % 10 in AM_PERIODS}
         exception_pm = domain & _pm_slots_for_day(grade_key, 3)
         domain = am_only | exception_pm
 
+    # 点名老师的"除某天外必须上午"要求（用户：卢诗雨除周二外都排上午）——
+    # 覆盖这位老师教的全部科目（不只是语文），combo槎位同样受约束。
+    # 注意 banduihuodong_fixed（周一下午第1节）是全校固定槎，不受这条影响（在上面已提前return）。
+    for t in teachers:
+        exc_day = TEACHER_AM_ONLY_EXCEPT_DAY.get(t)
+        if exc_day is not None:
+            am_only = {s for s in domain if s % 10 in AM_PERIODS}
+            exception_pm = domain & _pm_slots_for_day(grade_key, exc_day)
+            domain = am_only | exception_pm
+
     return domain
+
+
+def classify_teacher_for_caps(teacher, teacher_primaries, teacher_role_periods):
+    """决定这位老师适用哪一档"连堂上限/每天课时上限"。
+    规则（用户确认）：优先语文，其次数学，再其次按课时数最多的专职学科。
+    """
+    primaries = teacher_primaries.get(teacher, set())
+    if "语文" in primaries:
+        return "语文"
+    if "数学" in primaries:
+        return "数学"
+    roles = teacher_role_periods.get(teacher, {})
+    if not roles:
+        return None
+    return max(roles.items(), key=lambda kv: kv[1])[0]
+
+
+def _add_teacher_run_and_daily_caps(model, teacher_pool, day_vars, per_vars,
+                                     teacher_primaries, teacher_role_periods, max_period_by_grade):
+    """需求1：限制同一位老师"连续节次"的长度，以及每天的总课时数。
+    连堂按老师本人算，不看科目名——语文老师连着上"语文语文道法"就算3节连堂。
+    做法：为每位老师、每天、每节次建一个"这节有课"的bool，然后对每个长度为 cap+1 的
+    连续窗口要求"窗口内有课的节数 <= cap"，即不允许出现 cap+1 连堂。
+    """
+    stats = {"run_windows": 0, "daily_caps": 0, "teachers": 0}
+    uncovered_categories = set()
+    for teacher, pool in teacher_pool.items():
+        category = classify_teacher_for_caps(teacher, teacher_primaries, teacher_role_periods)
+        run_cap = RUN_CAP.get(category)
+        daily_cap = DAILY_PERIOD_CAP.get(category)
+        if run_cap is None and daily_cap is None:
+            # 防御：不允许"某个学科分类忘了配上限"导致这批老师完全不受约束（之前习读本/道法就踩过这个坑）
+            uncovered_categories.add(category)
+            continue
+        stats["teachers"] += 1
+
+        max_period = max(max_period_by_grade[key[0]] for key, _ in pool)
+
+        for d in range(1, 6):
+            busy = {}
+            for p in range(1, max_period + 1):
+                flags = []
+                for (key, idx) in pool:
+                    b = model.NewBoolVar(f"busy_{teacher}_{key}_{idx}_d{d}p{p}")
+                    is_day = model.NewBoolVar(f"bd_{teacher}_{key}_{idx}_d{d}p{p}")
+                    model.Add(day_vars[(key, idx)] == d).OnlyEnforceIf(is_day)
+                    model.Add(day_vars[(key, idx)] != d).OnlyEnforceIf(is_day.Not())
+                    is_per = model.NewBoolVar(f"bp_{teacher}_{key}_{idx}_d{d}p{p}")
+                    model.Add(per_vars[(key, idx)] == p).OnlyEnforceIf(is_per)
+                    model.Add(per_vars[(key, idx)] != p).OnlyEnforceIf(is_per.Not())
+                    model.AddBoolAnd([is_day, is_per]).OnlyEnforceIf(b)
+                    model.AddBoolOr([is_day.Not(), is_per.Not()]).OnlyEnforceIf(b.Not())
+                    flags.append(b)
+                slot_busy = model.NewBoolVar(f"slotbusy_{teacher}_d{d}p{p}")
+                model.AddMaxEquality(slot_busy, flags)
+                busy[p] = slot_busy
+
+            if daily_cap is not None:
+                model.Add(sum(busy.values()) <= daily_cap)
+                stats["daily_caps"] += 1
+
+            if run_cap is not None:
+                for start in range(1, max_period - run_cap + 1):
+                    window = [busy[p] for p in range(start, start + run_cap + 1)]
+                    model.Add(sum(window) <= run_cap)
+                    stats["run_windows"] += 1
+    if uncovered_categories:
+        raise ValueError(
+            f"以下学科分类没有配置连堂/每日课时上限，这批老师会完全不受约束，请补进 RUN_CAP/DAILY_PERIOD_CAP: "
+            f"{sorted(c for c in uncovered_categories if c)}")
+    return stats
 
 
 def build_model(classes, all_atoms, grades_filter=None, enabled_rules=None):
@@ -154,7 +310,8 @@ def build_model(classes, all_atoms, grades_filter=None, enabled_rules=None):
     """
     if enabled_rules is None:
         enabled_rules = {"chinese_daily", "math_daily", "pe_bijection", "no_double_subject",
-                          "teacher_conflict", "function_room", "cross_grade_adjacency"}
+                          "teacher_conflict", "function_room", "cross_grade_adjacency",
+                          "teacher_run_caps"}
     model = cp_model.CpModel()
 
     if grades_filter is not None:
@@ -162,6 +319,16 @@ def build_model(classes, all_atoms, grades_filter=None, enabled_rules=None):
 
     class_keys = build_class_key_list(classes)
     class_by_key = {(c["grade_key"], c["class_no"]): c for c in classes}
+
+    # 教师画像（用于需求1的分档）：每位老师涉及的primary_subject集合，以及各学科的总课时数
+    teacher_primaries = defaultdict(set)
+    teacher_role_periods = defaultdict(lambda: defaultdict(float))
+    for c in classes:
+        for e in c["subjects"]:
+            teacher_primaries[e["teacher_raw"]].add(e["col_primary_subject"])
+            teacher_role_periods[e["teacher_raw"]][e["col_primary_subject"]] += e["periods"]
+
+    max_period_by_grade = {gk: (6 if gk in GRADE26 else 7) for gk in CAMPUS_OF_GRADE}
 
     # 每个班：识别"语文老师"集合、"数学老师"集合（用于教研时间裁剪）
     chinese_teachers_by_class = {}
@@ -242,13 +409,44 @@ def build_model(classes, all_atoms, grades_filter=None, enabled_rules=None):
                 model.Add(excess >= sum(pm_bools) - 1)
                 penalty_terms.append((WEIGHT_PM_CORE_OVERFLOW, excess, key, f"pm_overflow_d{d}"))
 
+        # 需求2：这个班里"数学老师教的课"（数学+综合实践+劳动）全周下午的总节数——
+        # 硬上限2节，且超过1节就重罚，让求解器尽量压到1节（周三下午那节通常是唯一必须的）
+        math_teachers_here = math_teachers_by_class[key]
+        math_attributed_idxs = [
+            i for i, a in enumerate(atoms)
+            if a["subject"] in MATH_ATTRIBUTED_SUBJECTS and set(a["teachers"]) & math_teachers_here
+        ]
+        if math_attributed_idxs:
+            pm_flags = []
+            for i in math_attributed_idxs:
+                is_pm = model.NewBoolVar(f"mathpm_{key}_{i}")
+                model.Add(per_vars[(key, i)] >= 5).OnlyEnforceIf(is_pm)
+                model.Add(per_vars[(key, i)] <= 4).OnlyEnforceIf(is_pm.Not())
+                pm_flags.append(is_pm)
+            model.Add(sum(pm_flags) <= 2)  # 硬上限：一个班最多2节数学系课在下午
+            math_pm_excess = model.NewIntVar(0, 2, f"mathpmexcess_{key}")
+            model.Add(math_pm_excess >= sum(pm_flags) - 1)
+            penalty_terms.append((WEIGHT_MATH_PM_OVERFLOW, math_pm_excess, key, "math_pm_over_1"))
+
+        # 需求(追加)：语文老师(含道法/班队活动/劳动等他/她教的其它科目)一天总课时不能超过3节——
+        # 用户发现"语文语文+班会+道法"这种非连续但当天总数=4节的情况，也要卡住
+        chinese_teachers_here = chinese_teachers_by_class[key]
+        chinese_all_idxs = [
+            i for i, a in enumerate(atoms) if set(a["teachers"]) & chinese_teachers_here
+        ]
+        _add_daily_total_cap(model, key, chinese_all_idxs, day_vars, cap=3)
+
         # 每天都要有语文课（规则7）：语文类atom(含连堂两节)的day尽量覆盖5天（软约束，见_add_daily_coverage_soft注释）
         if "chinese_daily" in enabled_rules:
             chinese_idxs = [i for i, a in enumerate(atoms) if a["subject"] == CHINESE]
             _add_daily_coverage_soft(model, key, chinese_idxs, day_vars, penalty_terms, WEIGHT_DAILY_CHINESE)
 
         # 每天都要有数学老师上的课（规则7，综合实践算数学老师的课，含combo2里那半是"综合实践"且由数学老师教的情况——
-        # 六年级的综合实践0.5被合并进了劳动/劳动人工智能combo，那个slot单双周里有一半也是数学老师在教，同样算数学课）
+        # 六年级的综合实践0.5被合并进了劳动/劳动人工智能combo，那个slot单双周里有一半也是数学老师在教，同样算数学课）。
+        # 用户明确要求这是"最起码"必须满足的——但实测发现某些年级（如二年级7对共享数学老师的班级组合在一起时）
+        # 即便每一对单独可行，14个班放在一起硬性要求"每班每天都有"仍会数学上不可行（多班资源整体挤兑），
+        # 所以保留软约束+超高权重的做法（几乎当硬约束用，但不会把整个模型拖到INFEASIBLE），
+        # 已经用周三上午第4节的例外解决了共享数学老师的大部分物理冲突。
         if "math_daily" in enabled_rules:
             def _is_math_atom(a):
                 if a["subject"] == MATH:
@@ -289,6 +487,14 @@ def build_model(classes, all_atoms, grades_filter=None, enabled_rules=None):
         for t, pool in teacher_pool.items():
             if len(pool) > 1:
                 model.AddAllDifferent([slot_vars[p] for p in pool])
+
+    # 需求1：同一老师的连堂上限 + 专职老师每天课时上限（硬约束）
+    if "teacher_run_caps" in enabled_rules:
+        cap_stats = _add_teacher_run_and_daily_caps(
+            model, teacher_pool, day_vars, per_vars,
+            teacher_primaries, teacher_role_periods, max_period_by_grade)
+        print(f"  连堂/每日上限约束：覆盖{cap_stats['teachers']}位老师，"
+              f"{cap_stats['run_windows']}个连堂窗口，{cap_stats['daily_caps']}条每日上限")
 
     # 规则11：同一位老师跨年级的课尽量错开，不要前后两节连堂——
     # 跨校区（一年级B校区 vs 其余A校区）物理上不可能连着上，升级为硬约束直接禁止；

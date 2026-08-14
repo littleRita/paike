@@ -7,6 +7,7 @@ import openpyxl
 from openpyxl.styles import Alignment
 
 from parse_input import load_classes, apply_confirmed_disambiguations, BASE
+from solve import WEEK_LABEL_FIRST, WEEK_LABEL_SECOND
 
 OUTPUT_XLSX = BASE / "今年最终课表_待填写.xlsx"
 
@@ -22,13 +23,15 @@ def periods_for_grade_row_layout(grade_key):
 
 def format_atom_lines(atom):
     """把一个atom格式化成(科目行文字, 教师行文字)。
-    combo科目按去年真实样例的确切格式（见一年级1班周四第5节）：
-    第一行(通常是"科目行"这一行) = "科目A(教师A)"；第二行(通常是"教师行"这一行) = "科目B(教师B)"。
+    combo（单双周轮换）科目按去年真实样例的两行格式，并按用户要求注明单周/双周：
+    第一行 = "单周 科目A(教师A)"；第二行 = "双周 科目B(教师B)"。
+    约定：combo里排在前面的科目算单周，后面的算双周。
     """
     if atom["kind"] == "combo":
         subj_a, subj_b = atom["subject"].split("/")
         teacher_a, teacher_b = atom["teachers"]
-        return f"{subj_a}({teacher_a})", f"{subj_b}({teacher_b})"
+        return (f"{WEEK_LABEL_FIRST} {subj_a}({teacher_a})",
+                f"{WEEK_LABEL_SECOND} {subj_b}({teacher_b})")
     subj = atom["subject"]
     teacher = ",".join(atom["teachers"])
     return subj, f"({teacher})"
